@@ -1,0 +1,18 @@
+{
+  "name": "TiendaPe",
+  "short_name": "TiendaPe",
+  "description": "Ventas, caja e inventario para tiendas pequeñas.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#d8edf2",
+  "theme_color": "#164f60",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/tiendape-icon.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

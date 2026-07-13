@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 64" role="img" aria-label="TiendaPe">
+  <defs>
+    <linearGradient id="pill" x1="14" x2="82" y1="8" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7C3FB1"/>
+      <stop offset="1" stop-color="#4B2179"/>
+    </linearGradient>
+    <linearGradient id="awning" x1="27" x2="69" y1="20" y2="35" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C084FC"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+  </defs>
+  <rect width="92" height="58" x="2" y="3" fill="url(#pill)" rx="29"/>
+  <path fill="#FFFFFF" fill-opacity=".18" d="M17 8h37c-11 7-18 18-22 34H12c1-15 2-25 5-34Z"/>
+  <path fill="#F8F2FF" d="M35 25a13 13 0 0 1 26 0h-6a7 7 0 0 0-14 0h-6Z"/>
+  <path fill="#210B3D" d="M27 25h42c3 0 5 2 5 5v4H22v-4c0-3 2-5 5-5Z" opacity=".55"/>
+  <path fill="url(#awning)" d="M23 31h50l4 13c1 5-4 9-10 7-3 4-10 4-14 0-4 4-11 4-15 0-5 3-13 0-14-6l-1-14Z"/>
+  <path fill="#FFFFFF" d="M30 44h36v7c0 4-3 7-7 7H37c-4 0-7-3-7-7v-7Z"/>
+  <path fill="#5B2A86" d="M44 45h8v13h-8z"/>
+  <path fill="#FFFFFF" d="M37 42h22v6H37z"/>
+</svg>
