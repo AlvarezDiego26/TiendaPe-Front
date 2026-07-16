@@ -126,8 +126,14 @@ type CashSession = {
   difference: number | null
   cashSales: number
   digitalSales: number
+  yapeSales: number
+  plinSales: number
+  transferSales: number
   cashExpenses: number
   digitalExpenses: number
+  supplierPayments: number
+  personalWithdrawals: number
+  finalCash: number | null
   hasNegativeStreakAlert: boolean
 }
 
@@ -138,6 +144,9 @@ type Summary = {
   netProfit: number
   cashSales: number
   digitalSales: number
+  yapeSales: number
+  plinSales: number
+  transferSales: number
 }
 
 type TopProduct = {
@@ -209,8 +218,37 @@ type PurchaseResponse = {
   notes: string | null
 }
 
+type InventoryMovement = {
+  id: string
+  productId: string
+  productName: string
+  presentationId: string | null
+  reason: string
+  quantityInput: number
+  inputUnit: string
+  quantityBase: number
+  unitCostBase: number | null
+  totalCost: number | null
+  referenceTable: string | null
+  referenceId: string | null
+  notes: string | null
+  occurredAt: string
+}
+
+type CashMovement = {
+  id: string
+  cashSessionId: string | null
+  type: string
+  paymentMethod: PaymentMethod
+  amount: number
+  description: string | null
+  referenceTable: string | null
+  referenceId: string | null
+  occurredAt: string
+}
+
 type CartItem = Product & { quantity: number; presentationId?: string | null; unitLabel?: string | null }
-type PaymentMethod = 'cash' | 'yape_plin'
+type PaymentMethod = 'cash' | 'yape_plin' | 'yape' | 'plin' | 'transfer'
 
 type ToastKind = 'success' | 'error'
 type Toast = { type: ToastKind; message: string } | null
@@ -252,6 +290,28 @@ const availableStock = (product: Product) => product.stockBase || product.stock
 const stockUnit = (product: Product) => product.baseUnit || product.saleUnit || product.unit || 'unidades'
 const formatQuantity = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')
 const formatDate = (value: string | null) => value ? new Date(value).toLocaleDateString('es-PE', { day: '2-digit', month: 'short', year: 'numeric' }) : 'sin fecha'
+const paymentLabel = (value: string) => {
+  if (value === 'cash') return 'Efectivo'
+  if (value === 'yape') return 'Yape'
+  if (value === 'plin') return 'Plin'
+  if (value === 'transfer') return 'Transferencia'
+  return 'Yape/Plin'
+}
+const cashMovementLabel = (value: string) => {
+  if (value === 'supplier_payment') return 'Pago proveedor'
+  if (value === 'personal_withdrawal') return 'Retiro personal'
+  if (value === 'cash_adjustment') return 'Ajuste de caja'
+  return 'Movimiento'
+}
+const inventoryReasonLabel = (value: string) => {
+  if (value === 'purchase') return 'Compra'
+  if (value === 'sale') return 'Venta'
+  if (value === 'adjustment') return 'Ajuste'
+  if (value === 'return') return 'Devolucion'
+  if (value === 'initial_stock') return 'Stock inicial'
+  if (value === 'waste') return 'Merma'
+  return value
+}
 const isExpiringSoon = (value: string | null) => {
   if (!value) return false
   const expiration = new Date(value)
@@ -293,12 +353,15 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [products, setProducts] = useState<Product[]>([])
   const [summary, setSummary] = useState<Summary | null>(null)
+  const [monthSummary, setMonthSummary] = useState<Summary | null>(null)
   const [topProducts, setTopProducts] = useState<TopProduct[]>([])
   const [monthTopProducts, setMonthTopProducts] = useState<TopProduct[]>([])
   const [todaySales, setTodaySales] = useState<SaleResponse[]>([])
   const [monthPurchases, setMonthPurchases] = useState<PurchaseResponse[]>([])
   const [expenses, setExpenses] = useState<Expense[]>([])
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  const [inventoryMovements, setInventoryMovements] = useState<InventoryMovement[]>([])
+  const [cashMovements, setCashMovements] = useState<CashMovement[]>([])
   const [cashSession, setCashSession] = useState<CashSession | null>(null)
   const [cashHistory, setCashHistory] = useState<CashSession[]>([])
   const [cart, setCart] = useState<CartItem[]>([])
@@ -383,10 +446,11 @@ function App() {
       setProductsError(false)
       const today = dayRange()
       const month = monthRange()
-      const [currentCash, productData, summaryData, topData, monthTopData, todaySaleData, cashHistoryData, expenseData, supplierData, monthPurchaseData] = await Promise.all([
+      const [currentCash, productData, summaryData, monthSummaryData, topData, monthTopData, todaySaleData, cashHistoryData, expenseData, supplierData, monthPurchaseData, inventoryMovementData, cashMovementData] = await Promise.all([
         load<CashSession | null>(() => authedFetch<CashSession>('/api/cash-sessions/current'), cashSession),
         load(() => authedFetch<Product[]>('/api/products?limit=300', { timeoutMs: 45000 }), products, () => setProductsError(true)),
         load(() => authedFetch<Summary>('/api/reports/summary'), summary),
+        load(() => authedFetch<Summary>(`/api/reports/summary?from=${encodeURIComponent(month.from)}&to=${encodeURIComponent(month.to)}`), monthSummary),
         load(() => authedFetch<TopProduct[]>('/api/reports/top-products?limit=5'), topProducts),
         load(() => authedFetch<TopProduct[]>(`/api/reports/top-products?from=${encodeURIComponent(month.from)}&to=${encodeURIComponent(month.to)}&limit=5`), monthTopProducts),
         load(() => authedFetch<SaleResponse[]>(`/api/sales?from=${encodeURIComponent(today.from)}&to=${encodeURIComponent(today.to)}`, { timeoutMs: 45000 }), todaySales),
@@ -394,10 +458,13 @@ function App() {
         load(() => authedFetch<Expense[]>('/api/expenses'), expenses),
         load(() => authedFetch<Supplier[]>('/api/suppliers?limit=200'), suppliers),
         load(() => authedFetch<PurchaseResponse[]>(`/api/purchases?from=${encodeURIComponent(month.from)}&to=${encodeURIComponent(month.to)}`, { timeoutMs: 45000 }), monthPurchases),
+        load(() => authedFetch<InventoryMovement[]>('/api/inventory-movements?limit=80', { timeoutMs: 45000 }), inventoryMovements),
+        load(() => authedFetch<CashMovement[]>('/api/cash-movements?limit=80', { timeoutMs: 45000 }), cashMovements),
       ])
       setCashSession(currentCash)
       setProducts(productData)
       setSummary(summaryData)
+      setMonthSummary(monthSummaryData)
       setTopProducts(topData)
       setMonthTopProducts(monthTopData)
       setTodaySales(todaySaleData)
@@ -405,6 +472,8 @@ function App() {
       setCashHistory(cashHistoryData)
       setExpenses(expenseData)
       setSuppliers(supplierData)
+      setInventoryMovements(inventoryMovementData)
+      setCashMovements(cashMovementData)
     } finally {
       setLoading(false)
     }
@@ -633,14 +702,20 @@ function App() {
         }),
       )
       setSummary((current) => {
-        const base = current ?? { income: 0, expenses: 0, costOfGoodsSold: 0, netProfit: 0, cashSales: 0, digitalSales: 0 }
+        const base = current ?? { income: 0, expenses: 0, costOfGoodsSold: 0, netProfit: 0, cashSales: 0, digitalSales: 0, yapeSales: 0, plinSales: 0, transferSales: 0 }
+        const isYape = paymentMethod === 'yape' || paymentMethod === 'yape_plin'
+        const isPlin = paymentMethod === 'plin'
+        const isTransfer = paymentMethod === 'transfer'
         return {
           ...base,
           income: base.income + total,
           costOfGoodsSold: base.costOfGoodsSold + cost,
           netProfit: base.netProfit + total - cost,
           cashSales: paymentMethod === 'cash' ? base.cashSales + total : base.cashSales,
-          digitalSales: paymentMethod === 'yape_plin' ? base.digitalSales + total : base.digitalSales,
+          digitalSales: paymentMethod !== 'cash' ? base.digitalSales + total : base.digitalSales,
+          yapeSales: isYape ? base.yapeSales + total : base.yapeSales,
+          plinSales: isPlin ? base.plinSales + total : base.plinSales,
+          transferSales: isTransfer ? base.transferSales + total : base.transferSales,
         }
       })
       setCashSession((current) =>
@@ -648,7 +723,10 @@ function App() {
           ? {
               ...current,
               cashSales: paymentMethod === 'cash' ? current.cashSales + total : current.cashSales,
-              digitalSales: paymentMethod === 'yape_plin' ? current.digitalSales + total : current.digitalSales,
+              digitalSales: paymentMethod !== 'cash' ? current.digitalSales + total : current.digitalSales,
+              yapeSales: paymentMethod === 'yape' || paymentMethod === 'yape_plin' ? current.yapeSales + total : current.yapeSales,
+              plinSales: paymentMethod === 'plin' ? current.plinSales + total : current.plinSales,
+              transferSales: paymentMethod === 'transfer' ? current.transferSales + total : current.transferSales,
             }
           : current,
       )
@@ -831,6 +909,7 @@ function App() {
         {view === 'dashboard' && (
           <Dashboard
             summary={summary}
+            monthSummary={monthSummary}
             products={products}
             lowStock={lowStock}
             topProducts={topProducts}
@@ -864,6 +943,8 @@ function App() {
           <CashView
             cashSession={cashSession}
             cashHistory={cashHistory}
+            cashMovements={cashMovements}
+            suppliers={suppliers}
             setCashSession={setCashSession}
             setCashHistory={setCashHistory}
             refresh={refresh}
@@ -873,7 +954,7 @@ function App() {
         )}
         {view === 'purchases' && <PurchasesViewV2 products={products} suppliers={suppliers} refresh={refresh} request={authedFetch} showToast={showToast} />}
         {view === 'expenses' && <ExpensesView expenses={expenses} refresh={refresh} request={authedFetch} showToast={showToast} />}
-        {view === 'reports' && <ReportsViewV2 summary={summary} topProducts={topProducts} products={products} expenses={expenses} />}
+        {view === 'reports' && <ReportsViewV2 summary={summary} topProducts={topProducts} products={products} expenses={expenses} inventoryMovements={inventoryMovements} />}
         {view === 'settings' && <SettingsView apiUrl={API_URL} user={auth} />}
       </main>
 
@@ -997,6 +1078,7 @@ function AuthScreen({ onAuth, showToast }: { onAuth: (auth: AuthResponse) => voi
 
 function Dashboard({
   summary,
+  monthSummary,
   products,
   lowStock,
   topProducts,
@@ -1008,6 +1090,7 @@ function Dashboard({
   setView,
 }: {
   summary: Summary | null
+  monthSummary: Summary | null
   products: Product[]
   lowStock: Product[]
   topProducts: TopProduct[]
@@ -1031,7 +1114,7 @@ function Dashboard({
   const inventoryValue = products.reduce((sum, product) => sum + availableStock(product) * (product.averageCostBase || product.purchasePrice), 0)
   const monthPurchasesTotal = monthPurchases.reduce((sum, purchase) => sum + purchase.total, 0)
   const expiringCount = products.filter((product) => isExpiringSoon(product.expirationDate)).length
-  const monthProfit = (summary?.income ?? 0) - (summary?.costOfGoodsSold ?? 0) - (summary?.expenses ?? 0)
+  const monthProfit = monthSummary?.netProfit ?? 0
   const chartData = [
     { name: 'Ventas', value: summary?.income ?? 0 },
     { name: 'Gastos', value: summary?.expenses ?? 0 },
@@ -1040,7 +1123,9 @@ function Dashboard({
   ]
   const pieData = [
     { name: 'Efectivo', value: summary?.cashSales ?? 0, color: '#5b2a86' },
-    { name: 'Yape/Plin', value: summary?.digitalSales ?? 0, color: '#b985dd' },
+    { name: 'Yape', value: summary?.yapeSales ?? 0, color: '#8b3fd0' },
+    { name: 'Plin', value: summary?.plinSales ?? 0, color: '#b985dd' },
+    { name: 'Transferencia', value: summary?.transferSales ?? 0, color: '#2f9f9b' },
   ]
 
   return (
@@ -1058,11 +1143,14 @@ function Dashboard({
 
       <MetricCard label="Ventas del dia" value={money.format(todayTotal)} icon={CreditCard} tone="blue" />
       <MetricCard label="Utilidad del dia" value={money.format(todayProfit || todayTotal - todayCost)} icon={DollarSign} tone="green" />
+      <MetricCard label="Ventas del mes" value={money.format(monthSummary?.income ?? 0)} icon={TrendingUp} tone="blue" />
+      <MetricCard label="Utilidad del mes" value={money.format(monthProfit)} icon={DollarSign} tone="green" />
       <MetricCard label="Valor inventario" value={money.format(inventoryValue)} icon={Boxes} tone="teal" />
       <MetricCard label="Compras del mes" value={money.format(monthPurchasesTotal)} icon={PackagePlus} tone="amber" />
       <MetricCard label="Ventas efectivo" value={money.format(summary?.cashSales ?? 0)} icon={Wallet} tone="green" />
-      <MetricCard label="Ventas Yape/Plin" value={money.format(summary?.digitalSales ?? 0)} icon={CreditCard} tone="blue" />
-      <MetricCard label="Transferencias" value={money.format(0)} icon={TrendingUp} tone="teal" />
+      <MetricCard label="Ventas Yape" value={money.format(summary?.yapeSales ?? 0)} icon={CreditCard} tone="blue" />
+      <MetricCard label="Ventas Plin" value={money.format(summary?.plinSales ?? 0)} icon={CreditCard} tone="blue" />
+      <MetricCard label="Transferencias" value={money.format(summary?.transferSales ?? 0)} icon={TrendingUp} tone="teal" />
       <MetricCard label="Por vencer" value={`${expiringCount}`} icon={CalendarClock} tone="amber" />
       <MetricCard label="Stock bajo" value={`${lowStock.length}`} icon={AlertTriangle} tone="amber" />
       <MetricCard label="Productos activos" value={`${products.length}`} icon={Boxes} tone="teal" />
@@ -1089,7 +1177,7 @@ function Dashboard({
         <div className="panel-title">
           <div>
             <span className="eyebrow">Pagos</span>
-            <h3>Efectivo vs Yape/Plin</h3>
+            <h3>Distribucion de pagos</h3>
           </div>
         </div>
         <ResponsiveContainer width="100%" height={220}>
@@ -1104,7 +1192,9 @@ function Dashboard({
         </ResponsiveContainer>
         <div className="legend-row">
           <span>Efectivo {money.format(summary?.cashSales ?? 0)}</span>
-          <span>Yape/Plin {money.format(summary?.digitalSales ?? 0)}</span>
+          <span>Yape {money.format(summary?.yapeSales ?? 0)}</span>
+          <span>Plin {money.format(summary?.plinSales ?? 0)}</span>
+          <span>Transferencia {money.format(summary?.transferSales ?? 0)}</span>
         </div>
       </Card>
 
@@ -1125,7 +1215,7 @@ function Dashboard({
             <div className="sale-row" key={sale.id}>
               <div>
                 <strong>{new Date(sale.occurredAt).toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit' })}</strong>
-                <span>{sale.paymentMethod === 'cash' ? 'Efectivo' : 'Yape/Plin'}</span>
+                <span>{paymentLabel(sale.paymentMethod)}</span>
               </div>
               <div className="sale-products">
                 {sale.items.length === 0 ? (
@@ -1347,20 +1437,16 @@ function PosView({
         </div>
         <span className="payment-label">Forma de pago</span>
         <div className="payment-methods" aria-label="Método de pago">
-          <button
-            className={`payment-option ${paymentMethod === 'cash' ? 'active' : ''}`}
-            onClick={() => setPaymentMethod('cash')}
-            type="button"
-          >
-            Efectivo
-          </button>
-          <button
-            className={`payment-option ${paymentMethod === 'yape_plin' ? 'active' : ''}`}
-            onClick={() => setPaymentMethod('yape_plin')}
-            type="button"
-          >
-            Yape/Plin
-          </button>
+          {(['cash', 'yape', 'plin', 'transfer'] as PaymentMethod[]).map((method) => (
+            <button
+              className={`payment-option ${paymentMethod === method ? 'active' : ''}`}
+              key={method}
+              onClick={() => setPaymentMethod(method)}
+              type="button"
+            >
+              {paymentLabel(method)}
+            </button>
+          ))}
         </div>
         <button className="primary-button full checkout-button" disabled={cart.length === 0 || saleSubmitting} onClick={() => submitSale(paymentMethod)} type="button">
           {saleSubmitting ? 'Registrando venta...' : cart.length === 0 ? 'Agrega productos para vender' : `Cobrar ${money.format(cartTotal)}`}
@@ -1882,6 +1968,8 @@ function InventoryView({
 function CashView({
   cashSession,
   cashHistory,
+  cashMovements,
+  suppliers,
   setCashSession,
   setCashHistory,
   refresh,
@@ -1890,6 +1978,8 @@ function CashView({
 }: {
   cashSession: CashSession | null
   cashHistory: CashSession[]
+  cashMovements: CashMovement[]
+  suppliers: Supplier[]
   setCashSession: (session: CashSession | null) => void
   setCashHistory: React.Dispatch<React.SetStateAction<CashSession[]>>
   refresh: () => Promise<void>
@@ -1901,12 +1991,16 @@ function CashView({
   const [isOpening, setIsOpening] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
   const [cashModal, setCashModal] = useState<'open' | 'close' | null>(null)
-  const expectedCash = cashSession ? cashSession.openingAmount + cashSession.cashSales - cashSession.cashExpenses : 0
+  const [movementForm, setMovementForm] = useState({ type: 'supplier_payment', paymentMethod: 'cash' as PaymentMethod, amount: '0', description: '', supplierId: '' })
+  const [isSavingMovement, setIsSavingMovement] = useState(false)
+  const expectedCash = cashSession
+    ? cashSession.openingAmount + cashSession.cashSales - cashSession.cashExpenses - (cashSession.supplierPayments ?? 0) - (cashSession.personalWithdrawals ?? 0)
+    : 0
   const dailyCash = cashHistory.reduce<{ date: string; sessions: number; income: number; expenses: number; expected: number; difference: number }[]>((days, session) => {
     const date = new Date(session.openedAt).toLocaleDateString('es-PE', { day: '2-digit', month: 'short' })
     const existing = days.find((day) => day.date === date)
-    const income = session.cashSales + session.digitalSales
-    const expected = session.expectedAmount ?? session.openingAmount + session.cashSales - session.cashExpenses
+    const income = session.cashSales + session.digitalSales + (session.transferSales ?? 0)
+    const expected = session.expectedAmount ?? session.openingAmount + session.cashSales - session.cashExpenses - (session.supplierPayments ?? 0) - (session.personalWithdrawals ?? 0)
     const difference = session.difference ?? 0
 
     if (existing) {
@@ -1920,6 +2014,35 @@ function CashView({
 
     return [...days, { date, sessions: 1, income, expenses: session.cashExpenses, expected, difference }]
   }, [])
+
+  const saveCashMovement = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!cashSession || isSavingMovement) {
+      showToast('error', 'Abre caja antes de registrar movimientos.')
+      return
+    }
+
+    setIsSavingMovement(true)
+    try {
+      await request<CashMovement>('/api/cash-movements', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: movementForm.type,
+          paymentMethod: movementForm.paymentMethod,
+          amount: Number(movementForm.amount),
+          description: movementForm.description || null,
+          supplierId: movementForm.supplierId || null,
+        }),
+      })
+      setMovementForm({ type: 'supplier_payment', paymentMethod: 'cash', amount: '0', description: '', supplierId: '' })
+      showToast('success', 'Movimiento de caja registrado.')
+      await refresh()
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'No se pudo registrar el movimiento de caja.')
+    } finally {
+      setIsSavingMovement(false)
+    }
+  }
 
   const openCash = async () => {
     if (isOpening) return
@@ -2023,17 +2146,88 @@ function CashView({
           <div className="cash-metric-grid">
             <MetricLine label="Monto inicial" value={money.format(cashSession.openingAmount)} />
             <MetricLine label="Ventas efectivo" value={money.format(cashSession.cashSales)} />
-            <MetricLine label="Ventas Yape/Plin" value={money.format(cashSession.digitalSales)} />
+            <MetricLine label="Ventas Yape" value={money.format(cashSession.yapeSales ?? 0)} />
+            <MetricLine label="Ventas Plin" value={money.format(cashSession.plinSales ?? 0)} />
+            <MetricLine label="Transferencias" value={money.format(cashSession.transferSales ?? 0)} />
             <MetricLine label="Gastos efectivo" value={money.format(cashSession.cashExpenses)} />
-            <MetricLine label="Gastos Yape/Plin" value={money.format(cashSession.digitalExpenses ?? 0)} />
+            <MetricLine label="Gastos digitales" value={money.format(cashSession.digitalExpenses ?? 0)} />
+            <MetricLine label="Pagos proveedor" value={money.format(cashSession.supplierPayments ?? 0)} />
+            <MetricLine label="Retiros personales" value={money.format(cashSession.personalWithdrawals ?? 0)} />
           </div>
         </section>
       )}
 
+      <section className="panel cash-movement-panel">
+        <div className="panel-title">
+          <div>
+            <span className="eyebrow">Movimientos</span>
+            <h3>Pagos, retiros y ajustes</h3>
+          </div>
+        </div>
+        <form className="form-grid" onSubmit={saveCashMovement}>
+          <label>
+            Tipo
+            <select value={movementForm.type} onChange={(event) => setMovementForm({ ...movementForm, type: event.target.value })}>
+              <option value="supplier_payment">Pago proveedor</option>
+              <option value="personal_withdrawal">Retiro personal</option>
+              <option value="cash_adjustment">Ajuste de caja</option>
+              <option value="other">Otro movimiento</option>
+            </select>
+          </label>
+          <label>
+            Metodo
+            <select value={movementForm.paymentMethod} onChange={(event) => setMovementForm({ ...movementForm, paymentMethod: event.target.value as PaymentMethod })}>
+              <option value="cash">Efectivo</option>
+              <option value="yape">Yape</option>
+              <option value="plin">Plin</option>
+              <option value="transfer">Transferencia</option>
+            </select>
+          </label>
+          <label>
+            Monto
+            <input value={movementForm.amount} onChange={(event) => setMovementForm({ ...movementForm, amount: event.target.value })} type="number" min="0.1" step="0.1" />
+          </label>
+          <label>
+            Proveedor
+            <select value={movementForm.supplierId} onChange={(event) => setMovementForm({ ...movementForm, supplierId: event.target.value })}>
+              <option value="">Sin proveedor</option>
+              {suppliers.map((supplier) => (
+                <option key={supplier.id} value={supplier.id}>{supplier.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="full-field">
+            Detalle
+            <input value={movementForm.description} onChange={(event) => setMovementForm({ ...movementForm, description: event.target.value })} placeholder="Ej. pago a proveedor, retiro del dueno..." />
+          </label>
+          <button className="primary-button" disabled={!cashSession || isSavingMovement} type="submit">
+            {isSavingMovement ? 'Guardando...' : cashSession ? 'Guardar movimiento' : 'Abre caja primero'}
+          </button>
+        </form>
+      </section>
+
       <section className="panel cash-rule-panel">
         <span className="eyebrow">Regla de caja</span>
         <h3>Efectivo esperado</h3>
-        <p className="muted">Monto inicial + ventas en efectivo - gastos en efectivo. Yape/Plin queda para reportes, no para conteo físico.</p>
+        <p className="muted">Monto inicial + ventas en efectivo - gastos en efectivo - pagos a proveedores - retiros personales. Yape, Plin y transferencias quedan para reportes, no para conteo fisico.</p>
+      </section>
+      <section className="panel cash-movements-history">
+        <div className="panel-title">
+          <div>
+            <span className="eyebrow">Bitacora</span>
+            <h3>Movimientos recientes</h3>
+          </div>
+        </div>
+        <div className="table-list">
+          {cashMovements.slice(0, 8).map((movement) => (
+            <div className="table-row" key={movement.id}>
+              <span>{cashMovementLabel(movement.type)}</span>
+              <small>{paymentLabel(movement.paymentMethod)} - {movement.description || 'Sin detalle'}</small>
+              <b>{money.format(movement.amount)}</b>
+            </div>
+          ))}
+          {cashMovements.length === 0 && <EmptyText text="Sin movimientos de caja registrados." />}
+        </div>
       </section>
       <section className="panel cash-history-panel">
         <div className="panel-title">
@@ -2055,7 +2249,7 @@ function CashView({
               </div>
               <div className="cash-history-metrics">
                 <span>Inicial {money.format(session.openingAmount)}</span>
-                <span>Ventas {money.format(session.cashSales + session.digitalSales)}</span>
+                <span>Ventas {money.format(session.cashSales + session.digitalSales + (session.transferSales ?? 0))}</span>
                 <span>Gastos {money.format(session.cashExpenses)}</span>
               </div>
               <div className={`cash-difference ${(session.difference ?? 0) < 0 ? 'negative' : 'positive'}`}>
@@ -2136,13 +2330,15 @@ function CashView({
               >
                 <div className="cash-close-summary">
                   <MetricLine label="Efectivo esperado" value={money.format(expectedCash)} />
-                  <MetricLine label="Ventas Yape/Plin" value={money.format(cashSession?.digitalSales ?? 0)} />
+                  <MetricLine label="Yape, Plin y transferencias" value={money.format((cashSession?.digitalSales ?? 0) + (cashSession?.transferSales ?? 0))} />
+                  <MetricLine label="Pagos proveedor" value={money.format(cashSession?.supplierPayments ?? 0)} />
+                  <MetricLine label="Retiros personales" value={money.format(cashSession?.personalWithdrawals ?? 0)} />
                 </div>
                 <label>
                   Monto contado
                   <input value={countedAmount} onChange={(event) => setCountedAmount(event.target.value)} type="number" min="0" step="0.1" placeholder={money.format(expectedCash)} autoFocus />
                 </label>
-                <p className="muted">Cuenta solo el efectivo fisico de caja. Yape/Plin queda registrado en reportes.</p>
+                <p className="muted">Cuenta solo el efectivo fisico de caja. Yape, Plin y transferencias quedan registrados en reportes.</p>
                 <div className="modal-actions">
                   <button className="secondary-button" onClick={() => setCashModal(null)} type="button">
                     Cancelar
@@ -2526,7 +2722,9 @@ function ExpensesView({ expenses, refresh, request, showToast }: {
             Método
             <select value={form.paymentMethod} onChange={(event) => setForm({ ...form, paymentMethod: event.target.value })}>
               <option value="cash">Efectivo</option>
-              <option value="yape_plin">Yape/Plin</option>
+              <option value="yape">Yape</option>
+              <option value="plin">Plin</option>
+              <option value="transfer">Transferencia</option>
             </select>
           </label>
           <label className="check-row">
@@ -2603,7 +2801,9 @@ function ExpensesView({ expenses, refresh, request, showToast }: {
                 Metodo
                 <select value={editForm.paymentMethod} onChange={(event) => setEditForm({ ...editForm, paymentMethod: event.target.value })}>
                   <option value="cash">Efectivo</option>
-                  <option value="yape_plin">Yape/Plin</option>
+                  <option value="yape">Yape</option>
+                  <option value="plin">Plin</option>
+                  <option value="transfer">Transferencia</option>
                 </select>
               </label>
               <label className="check-row">
@@ -2681,7 +2881,7 @@ function ReportsView({ summary, topProducts, products, expenses }: { summary: Su
 }
 void ReportsView
 
-function ReportsViewV2({ summary, topProducts, products, expenses }: { summary: Summary | null; topProducts: TopProduct[]; products: Product[]; expenses: Expense[] }) {
+function ReportsViewV2({ summary, topProducts, products, expenses, inventoryMovements }: { summary: Summary | null; topProducts: TopProduct[]; products: Product[]; expenses: Expense[]; inventoryMovements: InventoryMovement[] }) {
   const inventoryValue = products.reduce((sum, product) => sum + (product.averageCostBase || product.purchasePrice) * availableStock(product), 0)
   const expenseChart = expenses.slice(0, 8).map((expense) => ({ name: expense.description.slice(0, 10), value: expense.amount }))
   const categoryChart = Object.values(
@@ -2798,6 +2998,23 @@ function ReportsViewV2({ summary, topProducts, products, expenses }: { summary: 
             </div>
           ))}
           {lowStockProducts.length === 0 && expiringProducts.length === 0 && <EmptyText text="Sin alertas criticas de inventario." />}
+        </div>
+      </section>
+
+      <section className="panel wide">
+        <span className="eyebrow">Movimiento de inventario</span>
+        <h3>Kardex reciente</h3>
+        <div className="table-list">
+          {inventoryMovements.slice(0, 12).map((movement) => (
+            <div className="table-row" key={movement.id}>
+              <span>{movement.productName}</span>
+              <small>
+                {inventoryReasonLabel(movement.reason)} - {new Date(movement.occurredAt).toLocaleDateString('es-PE', { day: '2-digit', month: 'short' })}
+              </small>
+              <b>{movement.quantityBase > 0 ? '+' : ''}{formatQuantity(movement.quantityBase)} {movement.inputUnit}</b>
+            </div>
+          ))}
+          {inventoryMovements.length === 0 && <EmptyText text="Sin movimientos registrados todavia." />}
         </div>
       </section>
     </div>
