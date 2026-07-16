@@ -19,6 +19,9 @@ import {
   ShoppingCart,
   Store,
   Trash2,
+  Star,
+  TrendingUp,
+  CalendarClock,
   Wallet,
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
@@ -72,6 +75,37 @@ type Product = {
   notes: string | null
   isActive: boolean
   isLowStock: boolean
+  baseUnit: string
+  trackingType: 'unit' | 'package' | 'weight' | 'bulk'
+  profitMarginPercent: number | null
+  suggestedPrice: number | null
+  purchaseUnit: string | null
+  saleUnit: string | null
+  unitsPerPackage: number
+  entryDate: string | null
+  supplierId: string | null
+  stockBase: number
+  minimumStockBase: number
+  averageCostBase: number
+  presentations: ProductPresentation[]
+}
+
+type ProductPresentation = {
+  id: string
+  name: string
+  unitLabel: string
+  quantityInBaseUnit: number
+  purchaseEnabled: boolean
+  saleEnabled: boolean
+  barcode: string | null
+  purchaseCost: number | null
+  salePrice: number | null
+  wholesalePrice: number | null
+  suggestedPrice: number | null
+  profitMarginPercent: number | null
+  isDefaultPurchase: boolean
+  isDefaultSale: boolean
+  isActive: boolean
 }
 
 type AuthResponse = {
@@ -111,6 +145,7 @@ type TopProduct = {
   productName: string
   quantity: number
   income: number
+  quantityBase?: number
 }
 
 type SaleItemResponse = {
@@ -119,6 +154,11 @@ type SaleItemResponse = {
   quantity: number
   unitPrice: number
   subtotal: number
+  presentationId: string | null
+  quantityBase: number
+  inputUnit: string | null
+  unitCostBase: number | null
+  profit: number | null
 }
 
 type SaleResponse = {
@@ -141,9 +181,35 @@ type Expense = {
   dueDay: number | null
   recurringStart: string | null
   recurringEnd: string | null
+  supplierId: string | null
+  isSupplierPayment: boolean
 }
 
-type CartItem = Product & { quantity: number }
+type Supplier = {
+  id: string
+  name: string
+  phone: string | null
+  company: string | null
+  notes: string | null
+  lastPurchaseAt: string | null
+  totalPurchased: number
+  pendingBalance: number
+  isActive: boolean
+}
+
+type PurchaseResponse = {
+  id: string
+  occurredAt: string
+  supplier: string
+  total: number
+  supplierId: string | null
+  paymentMethod: string
+  paidAmount: number
+  pendingAmount: number
+  notes: string | null
+}
+
+type CartItem = Product & { quantity: number; presentationId?: string | null; unitLabel?: string | null }
 type PaymentMethod = 'cash' | 'yape_plin'
 
 type ToastKind = 'success' | 'error'
@@ -182,6 +248,21 @@ const money = new Intl.NumberFormat('es-PE', {
 
 const toApiDate = (date: Date) => date.toISOString()
 
+const availableStock = (product: Product) => product.stockBase || product.stock
+const stockUnit = (product: Product) => product.baseUnit || product.saleUnit || product.unit || 'unidades'
+const formatQuantity = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')
+const formatDate = (value: string | null) => value ? new Date(value).toLocaleDateString('es-PE', { day: '2-digit', month: 'short', year: 'numeric' }) : 'sin fecha'
+const isExpiringSoon = (value: string | null) => {
+  if (!value) return false
+  const expiration = new Date(value)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const limit = new Date(today)
+  limit.setDate(limit.getDate() + 30)
+  return expiration >= today && expiration <= limit
+}
+const safeMargin = (cost: number, price: number) => cost > 0 ? ((price - cost) / cost) * 100 : 0
+
 const dayRange = () => {
   const from = new Date()
   from.setHours(0, 0, 0, 0)
@@ -215,13 +296,27 @@ function App() {
   const [topProducts, setTopProducts] = useState<TopProduct[]>([])
   const [monthTopProducts, setMonthTopProducts] = useState<TopProduct[]>([])
   const [todaySales, setTodaySales] = useState<SaleResponse[]>([])
+  const [monthPurchases, setMonthPurchases] = useState<PurchaseResponse[]>([])
   const [expenses, setExpenses] = useState<Expense[]>([])
+  const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [cashSession, setCashSession] = useState<CashSession | null>(null)
   const [cashHistory, setCashHistory] = useState<CashSession[]>([])
   const [cart, setCart] = useState<CartItem[]>([])
   const [search, setSearch] = useState('')
   const [saleSubmitting, setSaleSubmitting] = useState(false)
   const [productsError, setProductsError] = useState(false)
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() => {
+    const raw = localStorage.getItem('tiendape.favorites')
+    return raw ? JSON.parse(raw) : []
+  })
+
+  const toggleFavorite = (productId: string) => {
+    setFavoriteIds((current) => {
+      const next = current.includes(productId) ? current.filter((id) => id !== productId) : [productId, ...current]
+      localStorage.setItem('tiendape.favorites', JSON.stringify(next))
+      return next
+    })
+  }
 
   const authedFetch = async <T,>(path: string, options: ApiRequestInit = {}): Promise<T> => {
     const controller = options.signal ? null : new AbortController()
@@ -288,7 +383,7 @@ function App() {
       setProductsError(false)
       const today = dayRange()
       const month = monthRange()
-      const [currentCash, productData, summaryData, topData, monthTopData, todaySaleData, cashHistoryData, expenseData] = await Promise.all([
+      const [currentCash, productData, summaryData, topData, monthTopData, todaySaleData, cashHistoryData, expenseData, supplierData, monthPurchaseData] = await Promise.all([
         load<CashSession | null>(() => authedFetch<CashSession>('/api/cash-sessions/current'), cashSession),
         load(() => authedFetch<Product[]>('/api/products?limit=300', { timeoutMs: 45000 }), products, () => setProductsError(true)),
         load(() => authedFetch<Summary>('/api/reports/summary'), summary),
@@ -297,6 +392,8 @@ function App() {
         load(() => authedFetch<SaleResponse[]>(`/api/sales?from=${encodeURIComponent(today.from)}&to=${encodeURIComponent(today.to)}`, { timeoutMs: 45000 }), todaySales),
         load(() => authedFetch<CashSession[]>('/api/cash-sessions', { timeoutMs: 45000 }), cashHistory),
         load(() => authedFetch<Expense[]>('/api/expenses'), expenses),
+        load(() => authedFetch<Supplier[]>('/api/suppliers?limit=200'), suppliers),
+        load(() => authedFetch<PurchaseResponse[]>(`/api/purchases?from=${encodeURIComponent(month.from)}&to=${encodeURIComponent(month.to)}`, { timeoutMs: 45000 }), monthPurchases),
       ])
       setCashSession(currentCash)
       setProducts(productData)
@@ -304,8 +401,10 @@ function App() {
       setTopProducts(topData)
       setMonthTopProducts(monthTopData)
       setTodaySales(todaySaleData)
+      setMonthPurchases(monthPurchaseData)
       setCashHistory(cashHistoryData)
       setExpenses(expenseData)
+      setSuppliers(supplierData)
     } finally {
       setLoading(false)
     }
@@ -331,26 +430,34 @@ function App() {
   }
 
   const lowStock = products.filter((product) => product.isLowStock)
-  const outOfStock = products.filter((product) => product.stock <= 0)
+  const outOfStock = products.filter((product) => availableStock(product) <= 0)
+  const expiringProducts = products.filter((product) => isExpiringSoon(product.expirationDate))
   const negativeCashSessions = cashHistory.filter((session) => (session.difference ?? 0) < 0).slice(0, 3)
   const businessAlerts: BusinessAlert[] = [
     ...outOfStock.slice(0, 3).map((product) => ({
       id: `out-${product.id}`,
       level: 'danger' as const,
       title: 'Producto sin stock',
-      detail: `${product.name} esta en 0 unidades.`,
+      detail: `${product.name} esta en 0 ${product.baseUnit ?? 'unidades'}.`,
       action: 'inventory' as const,
     })),
     ...lowStock
-      .filter((product) => product.stock > 0)
+      .filter((product) => availableStock(product) > 0)
       .slice(0, 4)
       .map((product) => ({
         id: `low-${product.id}`,
         level: 'warning' as const,
         title: 'Stock bajo',
-        detail: `${product.name}: quedan ${product.stock} unidades.`,
+        detail: `${product.name}: quedan ${formatQuantity(availableStock(product))} ${product.baseUnit ?? 'unidades'}.`,
         action: 'inventory' as const,
       })),
+    ...expiringProducts.slice(0, 3).map((product) => ({
+      id: `exp-${product.id}`,
+      level: 'warning' as const,
+      title: 'Producto por vencer',
+      detail: `${product.name}: vence ${formatDate(product.expirationDate)}.`,
+      action: 'inventory' as const,
+    })),
     ...negativeCashSessions.map((session) => ({
       id: `cash-${session.id}`,
       level: 'danger' as const,
@@ -424,6 +531,51 @@ function App() {
     setCart((items) => items.filter((item) => item.id !== productId))
   }
 
+  const addToCartSmart = (product: Product) => {
+    const stock = availableStock(product)
+    const defaultSalePresentation = product.presentations?.find((presentation) => presentation.isDefaultSale && presentation.saleEnabled)
+      ?? product.presentations?.find((presentation) => presentation.saleEnabled)
+
+    if (stock <= 0) {
+      showToast('error', `${product.name} no tiene stock disponible.`)
+      return
+    }
+
+    setCart((items) => {
+      const current = items.find((item) => item.id === product.id)
+      if (!current) {
+        return [
+          ...items,
+          {
+            ...product,
+            quantity: 1,
+            presentationId: defaultSalePresentation?.id ?? null,
+            unitLabel: defaultSalePresentation?.unitLabel ?? stockUnit(product),
+          },
+        ]
+      }
+      if (current.quantity >= stock) {
+        showToast('error', `Stock maximo para ${product.name}: ${formatQuantity(stock)} ${stockUnit(product)}.`)
+        return items
+      }
+      return items.map((item) => (item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item))
+    })
+  }
+
+  const changeQuantitySmart = (productId: string, delta: number) => {
+    setCart((items) =>
+      items
+        .map((item) => {
+          if (item.id !== productId) return item
+          const quantity = Math.max(0, Math.min(availableStock(item), item.quantity + delta))
+          return { ...item, quantity }
+        })
+        .filter((item) => item.quantity > 0),
+    )
+  }
+  void addToCart
+  void changeQuantity
+
   const submitSale = async (paymentMethod: PaymentMethod) => {
     if (saleSubmitting) return
 
@@ -450,14 +602,19 @@ function App() {
         timeoutMs: 60000,
         body: JSON.stringify({
           paymentMethod,
-          items: soldItems.map((item) => ({ productId: item.id, quantity: item.quantity })),
+          items: soldItems.map((item) => ({ productId: item.id, quantity: item.quantity, presentationId: item.presentationId ?? null })),
         }),
       })
       setCart([])
       setTodaySales((current) => [{ ...sale, items: sale.items.length > 0 ? sale.items : soldItems.map((item) => ({
         productId: item.id,
         productName: item.name,
+        presentationId: item.presentationId ?? null,
         quantity: item.quantity,
+        quantityBase: item.quantity,
+        inputUnit: item.unitLabel ?? stockUnit(item),
+        unitCostBase: item.averageCostBase || item.purchasePrice,
+        profit: (item.salePrice - (item.averageCostBase || item.purchasePrice)) * item.quantity,
         unitPrice: item.salePrice,
         subtotal: item.salePrice * item.quantity,
       })) }, ...current])
@@ -466,7 +623,13 @@ function App() {
           const sold = soldItems.find((item) => item.id === product.id)
           if (!sold) return product
           const nextStock = Math.max(0, product.stock - sold.quantity)
-          return { ...product, stock: nextStock, isLowStock: nextStock <= product.minimumStock }
+          const nextStockBase = Math.max(0, availableStock(product) - sold.quantity)
+          return {
+            ...product,
+            stock: nextStock,
+            stockBase: nextStockBase,
+            isLowStock: nextStockBase <= (product.minimumStockBase || product.minimumStock),
+          }
         }),
       )
       setSummary((current) => {
@@ -673,9 +836,10 @@ function App() {
             topProducts={topProducts}
             monthTopProducts={monthTopProducts}
             todaySales={todaySales}
-            cashSession={cashSession}
-            expenses={expenses}
-            setView={setView}
+    cashSession={cashSession}
+    expenses={expenses}
+    monthPurchases={monthPurchases}
+    setView={setView}
           />
         )}
 
@@ -684,16 +848,18 @@ function App() {
             products={filteredProducts}
             cart={cart}
             cartTotal={cartTotal}
-            addToCart={addToCart}
-            changeQuantity={changeQuantity}
+            addToCart={addToCartSmart}
+            changeQuantity={changeQuantitySmart}
             removeFromCart={removeFromCart}
             productsError={productsError}
             submitSale={submitSale}
             saleSubmitting={saleSubmitting}
+            favoriteIds={favoriteIds}
+            toggleFavorite={toggleFavorite}
           />
         )}
 
-        {view === 'inventory' && <InventoryView products={filteredProducts} search={search} refresh={refresh} request={authedFetch} showToast={showToast} />}
+        {view === 'inventory' && <InventoryView products={filteredProducts} suppliers={suppliers} search={search} refresh={refresh} request={authedFetch} showToast={showToast} />}
         {view === 'cash' && (
           <CashView
             cashSession={cashSession}
@@ -705,9 +871,9 @@ function App() {
             showToast={showToast}
           />
         )}
-        {view === 'purchases' && <PurchasesView products={products} refresh={refresh} request={authedFetch} showToast={showToast} />}
+        {view === 'purchases' && <PurchasesViewV2 products={products} suppliers={suppliers} refresh={refresh} request={authedFetch} showToast={showToast} />}
         {view === 'expenses' && <ExpensesView expenses={expenses} refresh={refresh} request={authedFetch} showToast={showToast} />}
-        {view === 'reports' && <ReportsView summary={summary} topProducts={topProducts} products={products} expenses={expenses} />}
+        {view === 'reports' && <ReportsViewV2 summary={summary} topProducts={topProducts} products={products} expenses={expenses} />}
         {view === 'settings' && <SettingsView apiUrl={API_URL} user={auth} />}
       </main>
 
@@ -838,6 +1004,7 @@ function Dashboard({
   todaySales,
   cashSession,
   expenses,
+  monthPurchases,
   setView,
 }: {
   summary: Summary | null
@@ -848,10 +1015,23 @@ function Dashboard({
   todaySales: SaleResponse[]
   cashSession: CashSession | null
   expenses: Expense[]
+  monthPurchases: PurchaseResponse[]
   setView: (view: View) => void
 }) {
   const todayTotal = todaySales.reduce((sum, sale) => sum + sale.total, 0)
+  const todayCost = todaySales.reduce(
+    (sum, sale) => sum + sale.items.reduce((itemSum, item) => itemSum + (item.unitCostBase ?? 0) * (item.quantityBase || item.quantity), 0),
+    0,
+  )
+  const todayProfit = todaySales.reduce(
+    (sum, sale) => sum + sale.items.reduce((itemSum, item) => itemSum + (item.profit ?? item.subtotal - (item.unitCostBase ?? 0) * (item.quantityBase || item.quantity)), 0),
+    0,
+  )
   const todayItems = todaySales.reduce((sum, sale) => sum + sale.items.reduce((itemSum, item) => itemSum + item.quantity, 0), 0)
+  const inventoryValue = products.reduce((sum, product) => sum + availableStock(product) * (product.averageCostBase || product.purchasePrice), 0)
+  const monthPurchasesTotal = monthPurchases.reduce((sum, purchase) => sum + purchase.total, 0)
+  const expiringCount = products.filter((product) => isExpiringSoon(product.expirationDate)).length
+  const monthProfit = (summary?.income ?? 0) - (summary?.costOfGoodsSold ?? 0) - (summary?.expenses ?? 0)
   const chartData = [
     { name: 'Ventas', value: summary?.income ?? 0 },
     { name: 'Gastos', value: summary?.expenses ?? 0 },
@@ -876,8 +1056,14 @@ function Dashboard({
         </button>
       </Card>
 
-      <MetricCard label="Ganancia neta" value={money.format(summary?.netProfit ?? 0)} icon={DollarSign} tone="green" />
-      <MetricCard label="Ventas" value={money.format(summary?.income ?? 0)} icon={CreditCard} tone="blue" />
+      <MetricCard label="Ventas del dia" value={money.format(todayTotal)} icon={CreditCard} tone="blue" />
+      <MetricCard label="Utilidad del dia" value={money.format(todayProfit || todayTotal - todayCost)} icon={DollarSign} tone="green" />
+      <MetricCard label="Valor inventario" value={money.format(inventoryValue)} icon={Boxes} tone="teal" />
+      <MetricCard label="Compras del mes" value={money.format(monthPurchasesTotal)} icon={PackagePlus} tone="amber" />
+      <MetricCard label="Ventas efectivo" value={money.format(summary?.cashSales ?? 0)} icon={Wallet} tone="green" />
+      <MetricCard label="Ventas Yape/Plin" value={money.format(summary?.digitalSales ?? 0)} icon={CreditCard} tone="blue" />
+      <MetricCard label="Transferencias" value={money.format(0)} icon={TrendingUp} tone="teal" />
+      <MetricCard label="Por vencer" value={`${expiringCount}`} icon={CalendarClock} tone="amber" />
       <MetricCard label="Stock bajo" value={`${lowStock.length}`} icon={AlertTriangle} tone="amber" />
       <MetricCard label="Productos activos" value={`${products.length}`} icon={Boxes} tone="teal" />
 
@@ -963,6 +1149,7 @@ function Dashboard({
             <span className="eyebrow">Este mes</span>
             <h3>Productos lideres</h3>
           </div>
+          <small>Utilidad mes: {money.format(monthProfit)}</small>
         </div>
         <div className="rank-list">
           {monthTopProducts.length === 0 && <EmptyText text="Sin ventas en el mes actual." />}
@@ -1050,6 +1237,8 @@ function PosView({
   productsError,
   submitSale,
   saleSubmitting,
+  favoriteIds,
+  toggleFavorite,
 }: {
   products: Product[]
   cart: CartItem[]
@@ -1060,23 +1249,39 @@ function PosView({
   productsError: boolean
   submitSale: (paymentMethod: PaymentMethod) => void
   saleSubmitting: boolean
+  favoriteIds: string[]
+  toggleFavorite: (productId: string) => void
 }) {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash')
   const cartUnits = cart.reduce((sum, item) => sum + item.quantity, 0)
+  const favoriteProducts = products.filter((product) => favoriteIds.includes(product.id))
+  const orderedProducts = [...favoriteProducts, ...products.filter((product) => !favoriteIds.includes(product.id))]
 
   return (
     <div className="pos-layout">
       <section className="product-grid">
-        {products.map((product) => {
+        {orderedProducts.map((product) => {
           const selected = cart.find((item) => item.id === product.id)?.quantity ?? 0
+          const stock = availableStock(product)
 
           return (
             <button className={`product-tile ${selected ? 'selected' : ''}`} key={product.id} onClick={() => addToCart(product)} type="button">
+              <span
+                className={`favorite-toggle ${favoriteIds.includes(product.id) ? 'active' : ''}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  toggleFavorite(product.id)
+                }}
+                role="button"
+                tabIndex={0}
+              >
+                <Star size={14} />
+              </span>
               {selected > 0 && <span className="selected-badge">{selected} en carrito</span>}
               <span>{product.category}</span>
               <strong>{product.name}</strong>
               <b>{money.format(product.salePrice)}</b>
-              <small className={product.isLowStock ? 'danger' : ''}>Stock {product.stock}</small>
+              <small className={product.isLowStock ? 'danger' : ''}>Stock {formatQuantity(stock)} {stockUnit(product)}</small>
               <em>Agregar</em>
             </button>
           )
@@ -1114,9 +1319,9 @@ function PosView({
                     aria-label={`Editar cantidad de ${item.name}`}
                     className="quantity-input"
                     min="1"
-                    max={item.stock}
+                    max={availableStock(item)}
                     onChange={(event) => {
-                      const nextQuantity = Math.max(1, Math.min(item.stock, Number(event.target.value) || 1))
+                      const nextQuantity = Math.max(1, Math.min(availableStock(item), Number(event.target.value) || 1))
                       changeQuantity(item.id, nextQuantity - item.quantity)
                     }}
                     type="number"
@@ -1167,12 +1372,14 @@ function PosView({
 
 function InventoryView({
   products,
+  suppliers,
   search,
   refresh,
   request,
   showToast,
 }: {
   products: Product[]
+  suppliers: Supplier[]
   search: string
   refresh: () => Promise<void>
   request: <T>(path: string, options?: ApiRequestInit) => Promise<T>
@@ -1187,11 +1394,23 @@ function InventoryView({
     presentation: '',
     unit: '',
     supplier: '',
+    supplierId: '',
     purchasePrice: '0',
     salePrice: '0',
+    baseUnit: 'unidad',
+    trackingType: 'unit',
+    profitMarginPercent: '',
+    suggestedPrice: '',
+    purchaseUnit: 'unidad',
+    saleUnit: 'unidad',
+    unitsPerPackage: '1',
+    entryDate: toApiDate(new Date()),
     wholesalePrice: '',
     stock: '0',
     minimumStock: '0',
+    stockBase: '0',
+    minimumStockBase: '0',
+    averageCostBase: '0',
     expirationDate: '',
     location: '',
     notes: '',
@@ -1228,24 +1447,63 @@ function InventoryView({
     return () => window.clearTimeout(timer)
   }, [loadInventoryProducts])
 
-  const productPayload = (value: typeof productFormDefaults) => ({
-    name: value.name,
-    category: value.category,
-    internalCode: value.internalCode || null,
-    barcode: value.barcode || null,
-    brand: value.brand || null,
-    presentation: value.presentation || null,
-    unit: value.unit || null,
-    supplier: value.supplier || null,
-    purchasePrice: Number(value.purchasePrice),
-    salePrice: Number(value.salePrice),
-    wholesalePrice: value.wholesalePrice === '' ? null : Number(value.wholesalePrice),
-    stock: Number(value.stock),
-    minimumStock: Number(value.minimumStock),
-    expirationDate: value.expirationDate || null,
-    location: value.location || null,
-    notes: value.notes || null,
-  })
+  const productPayload = (value: typeof productFormDefaults) => {
+    const purchasePrice = Number(value.purchasePrice)
+    const salePrice = Number(value.salePrice)
+    const unitsPerPackage = Math.max(1, Number(value.unitsPerPackage) || 1)
+    const stock = Number(value.stock)
+    const minimumStock = Number(value.minimumStock)
+    const profitMarginPercent = value.profitMarginPercent === '' ? safeMargin(purchasePrice, salePrice) : Number(value.profitMarginPercent)
+    const suggestedPrice = value.suggestedPrice === '' ? null : Number(value.suggestedPrice)
+
+    return {
+      name: value.name,
+      category: value.category,
+      internalCode: value.internalCode || null,
+      barcode: value.barcode || null,
+      brand: value.brand || null,
+      presentation: value.presentation || null,
+      unit: value.unit || null,
+      supplier: value.supplier || null,
+      supplierId: value.supplierId || null,
+      purchasePrice,
+      salePrice,
+      baseUnit: value.baseUnit || value.saleUnit || value.unit || 'unidad',
+      trackingType: value.trackingType,
+      profitMarginPercent,
+      suggestedPrice,
+      purchaseUnit: value.purchaseUnit || 'unidad',
+      saleUnit: value.saleUnit || 'unidad',
+      unitsPerPackage,
+      entryDate: value.entryDate || null,
+      wholesalePrice: value.wholesalePrice === '' ? null : Number(value.wholesalePrice),
+      stock,
+      minimumStock,
+      stockBase: Number(value.stockBase || stock),
+      minimumStockBase: Number(value.minimumStockBase || minimumStock),
+      averageCostBase: Number(value.averageCostBase || purchasePrice),
+      expirationDate: value.expirationDate || null,
+      location: value.location || null,
+      notes: value.notes || null,
+      presentations: [
+        {
+          name: value.saleUnit || value.unit || 'Unidad',
+          unitLabel: value.saleUnit || value.unit || 'unidad',
+          quantityInBaseUnit: 1,
+          purchaseEnabled: true,
+          saleEnabled: true,
+          barcode: value.barcode || null,
+          purchaseCost: purchasePrice,
+          salePrice,
+          wholesalePrice: value.wholesalePrice === '' ? null : Number(value.wholesalePrice),
+          suggestedPrice,
+          profitMarginPercent,
+          isDefaultPurchase: true,
+          isDefaultSale: true,
+        },
+      ],
+    }
+  }
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -1279,7 +1537,19 @@ function InventoryView({
       presentation: product.presentation ?? '',
       unit: product.unit ?? '',
       supplier: product.supplier ?? '',
+      supplierId: product.supplierId ?? '',
+      baseUnit: product.baseUnit ?? product.unit ?? 'unidad',
+      trackingType: product.trackingType ?? 'unit',
+      profitMarginPercent: product.profitMarginPercent === null ? '' : String(product.profitMarginPercent ?? ''),
+      suggestedPrice: product.suggestedPrice === null ? '' : String(product.suggestedPrice ?? ''),
+      purchaseUnit: product.purchaseUnit ?? product.presentation ?? 'unidad',
+      saleUnit: product.saleUnit ?? product.unit ?? 'unidad',
+      unitsPerPackage: String(product.unitsPerPackage ?? 1),
+      entryDate: product.entryDate ? product.entryDate.slice(0, 10) : '',
       wholesalePrice: product.wholesalePrice === null ? '' : String(product.wholesalePrice),
+      stockBase: String(product.stockBase ?? product.stock),
+      minimumStockBase: String(product.minimumStockBase ?? product.minimumStock),
+      averageCostBase: String(product.averageCostBase ?? product.purchasePrice),
       expirationDate: product.expirationDate ? product.expirationDate.slice(0, 10) : '',
       location: product.location ?? '',
       notes: product.notes ?? '',
@@ -1317,6 +1587,11 @@ function InventoryView({
           </div>
         </div>
         <form className="form-grid" onSubmit={save}>
+          <datalist id="supplier-options">
+            {suppliers.map((supplier) => (
+              <option key={supplier.id} value={supplier.name} />
+            ))}
+          </datalist>
           <label>
             Nombre
             <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
@@ -1367,15 +1642,52 @@ function InventoryView({
               </label>
               <label>
                 Proveedor
-                <input value={form.supplier} onChange={(event) => setForm({ ...form, supplier: event.target.value })} />
+                <input list="supplier-options" value={form.supplier} onChange={(event) => setForm({ ...form, supplier: event.target.value })} />
+              </label>
+              <label>
+                Unidad compra
+                <input value={form.purchaseUnit} onChange={(event) => setForm({ ...form, purchaseUnit: event.target.value })} placeholder="paquete, caja, plancha" />
+              </label>
+              <label>
+                Unidad venta
+                <input value={form.saleUnit} onChange={(event) => setForm({ ...form, saleUnit: event.target.value })} placeholder="unidad, botella, kg" />
+              </label>
+              <label>
+                Cantidad por paquete
+                <input type="number" min="1" step="0.01" value={form.unitsPerPackage} onChange={(event) => setForm({ ...form, unitsPerPackage: event.target.value })} />
+              </label>
+              <label>
+                Tipo de control
+                <select value={form.trackingType} onChange={(event) => setForm({ ...form, trackingType: event.target.value })}>
+                  <option value="unit">Unidad</option>
+                  <option value="package">Paquete / caja</option>
+                  <option value="bulk">Granel</option>
+                  <option value="weight">Peso</option>
+                </select>
+              </label>
+              <label>
+                Unidad base
+                <input value={form.baseUnit} onChange={(event) => setForm({ ...form, baseUnit: event.target.value })} placeholder="unidad, kg, g" />
               </label>
               <label>
                 Precio compra
                 <input type="number" min="0" step="0.1" value={form.purchasePrice} onChange={(event) => setForm({ ...form, purchasePrice: event.target.value })} />
               </label>
               <label>
+                Margen ganancia %
+                <input type="number" min="0" step="0.1" value={form.profitMarginPercent} onChange={(event) => setForm({ ...form, profitMarginPercent: event.target.value })} placeholder={`${safeMargin(Number(form.purchasePrice), Number(form.salePrice)).toFixed(1)} sugerido`} />
+              </label>
+              <label>
+                Precio sugerido
+                <input type="number" min="0" step="0.1" value={form.suggestedPrice} onChange={(event) => setForm({ ...form, suggestedPrice: event.target.value })} placeholder={money.format(Number(form.purchasePrice) * 1.3)} />
+              </label>
+              <label>
                 Precio mayor
                 <input type="number" min="0" step="0.1" value={form.wholesalePrice} onChange={(event) => setForm({ ...form, wholesalePrice: event.target.value })} />
+              </label>
+              <label>
+                Fecha ingreso
+                <input type="date" value={form.entryDate} onChange={(event) => setForm({ ...form, entryDate: event.target.value })} />
               </label>
               <label>
                 Fecha vencimiento
@@ -1414,7 +1726,9 @@ function InventoryView({
               </div>
               <b>{money.format(product.salePrice)}</b>
               <div className="inventory-actions">
-                <small className={product.isLowStock ? 'danger pill' : 'pill'}>Stock {product.stock}</small>
+                <small className={product.isLowStock ? 'danger pill' : 'pill'}>
+                  Stock {formatQuantity(availableStock(product))} {stockUnit(product)}
+                </small>
                 <button className="secondary-button compact" onClick={() => openEdit(product)} type="button">
                   Editar
                 </button>
@@ -1488,15 +1802,52 @@ function InventoryView({
                   </label>
                   <label>
                     Proveedor
-                    <input value={editForm.supplier} onChange={(event) => setEditForm({ ...editForm, supplier: event.target.value })} />
+                    <input list="supplier-options" value={editForm.supplier} onChange={(event) => setEditForm({ ...editForm, supplier: event.target.value })} />
+                  </label>
+                  <label>
+                    Unidad compra
+                    <input value={editForm.purchaseUnit} onChange={(event) => setEditForm({ ...editForm, purchaseUnit: event.target.value })} />
+                  </label>
+                  <label>
+                    Unidad venta
+                    <input value={editForm.saleUnit} onChange={(event) => setEditForm({ ...editForm, saleUnit: event.target.value })} />
+                  </label>
+                  <label>
+                    Cantidad por paquete
+                    <input type="number" min="1" step="0.01" value={editForm.unitsPerPackage} onChange={(event) => setEditForm({ ...editForm, unitsPerPackage: event.target.value })} />
+                  </label>
+                  <label>
+                    Tipo de control
+                    <select value={editForm.trackingType} onChange={(event) => setEditForm({ ...editForm, trackingType: event.target.value })}>
+                      <option value="unit">Unidad</option>
+                      <option value="package">Paquete / caja</option>
+                      <option value="bulk">Granel</option>
+                      <option value="weight">Peso</option>
+                    </select>
+                  </label>
+                  <label>
+                    Unidad base
+                    <input value={editForm.baseUnit} onChange={(event) => setEditForm({ ...editForm, baseUnit: event.target.value })} />
                   </label>
                   <label>
                     Precio compra
                     <input type="number" min="0" step="0.1" value={editForm.purchasePrice} onChange={(event) => setEditForm({ ...editForm, purchasePrice: event.target.value })} />
                   </label>
                   <label>
+                    Margen ganancia %
+                    <input type="number" min="0" step="0.1" value={editForm.profitMarginPercent} onChange={(event) => setEditForm({ ...editForm, profitMarginPercent: event.target.value })} />
+                  </label>
+                  <label>
+                    Precio sugerido
+                    <input type="number" min="0" step="0.1" value={editForm.suggestedPrice} onChange={(event) => setEditForm({ ...editForm, suggestedPrice: event.target.value })} />
+                  </label>
+                  <label>
                     Precio mayor
                     <input type="number" min="0" step="0.1" value={editForm.wholesalePrice} onChange={(event) => setEditForm({ ...editForm, wholesalePrice: event.target.value })} />
+                  </label>
+                  <label>
+                    Fecha ingreso
+                    <input type="date" value={editForm.entryDate} onChange={(event) => setEditForm({ ...editForm, entryDate: event.target.value })} />
                   </label>
                   <label>
                     Fecha vencimiento
@@ -1911,6 +2262,164 @@ function PurchasesView({ products, refresh, request, showToast }: {
     </div>
   )
 }
+void PurchasesView
+
+function PurchasesViewV2({ products, suppliers, refresh, request, showToast }: {
+  products: Product[]
+  suppliers: Supplier[]
+  refresh: () => Promise<void>
+  request: <T>(path: string, options?: ApiRequestInit) => Promise<T>
+  showToast: (type: ToastKind, message: string) => void
+}) {
+  const [productId, setProductId] = useState('')
+  const [supplierName, setSupplierName] = useState('')
+  const [quantity, setQuantity] = useState('1')
+  const [unitsPerPackage, setUnitsPerPackage] = useState('1')
+  const [totalCost, setTotalCost] = useState('0')
+  const [isCredit, setIsCredit] = useState(false)
+  const selectedProduct = products.find((product) => product.id === productId)
+  const selectedSupplier = suppliers.find((supplier) => supplier.name.toLowerCase() === supplierName.trim().toLowerCase())
+  const quantityNumber = Math.max(0, Number(quantity) || 0)
+  const unitsPerPackageNumber = Math.max(1, Number(unitsPerPackage) || 1)
+  const totalCostNumber = Math.max(0, Number(totalCost) || 0)
+  const baseUnits = quantityNumber * unitsPerPackageNumber
+  const costPerPackage = quantityNumber > 0 ? totalCostNumber / quantityNumber : 0
+  const costPerUnit = baseUnits > 0 ? totalCostNumber / baseUnits : 0
+  const suggestedSalePrice = Math.ceil(costPerUnit * 1.3 * 10) / 10
+  const salePrice = selectedProduct?.salePrice ?? 0
+  const marginPercent = safeMargin(costPerUnit, salePrice || suggestedSalePrice)
+  const stockAfterPurchase = selectedProduct ? availableStock(selectedProduct) + baseUnits : baseUnits
+
+  const selectProduct = (nextProductId: string) => {
+    const product = products.find((item) => item.id === nextProductId)
+    setProductId(nextProductId)
+    if (!product) return
+    setUnitsPerPackage(String(product.unitsPerPackage || 1))
+    setTotalCost(String(product.purchasePrice || product.averageCostBase || 0))
+    setSupplierName(product.supplier ?? '')
+  }
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!selectedProduct) {
+      showToast('error', 'Selecciona un producto registrado.')
+      return
+    }
+
+    try {
+      await request('/api/purchases', {
+        method: 'POST',
+        body: JSON.stringify({
+          supplier: supplierName || selectedProduct.supplier || 'Proveedor',
+          supplierId: selectedSupplier?.id ?? selectedProduct.supplierId ?? null,
+          isCredit,
+          items: [
+            {
+              productId,
+              quantity: quantityNumber,
+              unitCost: costPerPackage,
+              inputUnit: selectedProduct.purchaseUnit || selectedProduct.presentation || 'paquete',
+              unitsPerPackage: unitsPerPackageNumber,
+              totalCost: totalCostNumber,
+              suggestedPrice: suggestedSalePrice,
+              profitMarginPercent: marginPercent,
+            },
+          ],
+        }),
+      })
+      showToast('success', 'Compra registrada y stock actualizado.')
+      setQuantity('1')
+      setTotalCost('0')
+      await refresh()
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'No se pudo registrar la compra.')
+    }
+  }
+
+  return (
+    <div className="purchase-layout">
+      <Card className="panel form-panel">
+        <span className="eyebrow">Reposicion</span>
+        <h3>Registrar compra</h3>
+        <p className="muted form-help">Compra por paquete, caja o plancha. El sistema convierte automaticamente a unidades vendibles.</p>
+        <form className="form-grid" onSubmit={save}>
+          <datalist id="purchase-suppliers">
+            {suppliers.map((supplier) => (
+              <option key={supplier.id} value={supplier.name} />
+            ))}
+          </datalist>
+          <label>
+            Proveedor
+            <input list="purchase-suppliers" value={supplierName} onChange={(event) => setSupplierName(event.target.value)} placeholder="Ej. Distribuidora Lima" />
+          </label>
+          <label>
+            Producto
+            <select value={productId} onChange={(event) => selectProduct(event.target.value)} required>
+              <option value="">Seleccionar producto</option>
+              {products.map((product) => (
+                <option key={product.id} value={product.id}>
+                  {product.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Cantidad comprada
+            <input value={quantity} onChange={(event) => setQuantity(event.target.value)} type="number" min="1" step="0.01" />
+          </label>
+          <label>
+            Unidades por paquete
+            <input value={unitsPerPackage} onChange={(event) => setUnitsPerPackage(event.target.value)} type="number" min="1" step="0.01" />
+          </label>
+          <label>
+            Costo total
+            <input value={totalCost} onChange={(event) => setTotalCost(event.target.value)} type="number" min="0" step="0.1" />
+          </label>
+          <label className="check-row">
+            <input checked={isCredit} onChange={(event) => setIsCredit(event.target.checked)} type="checkbox" />
+            Compra al credito
+          </label>
+          <button className="primary-button" type="submit">Registrar compra</button>
+        </form>
+      </Card>
+
+      <Card className="panel purchase-summary-panel">
+        <span className="eyebrow">Calculo automatico</span>
+        <h3>Impacto de la compra</h3>
+        {selectedProduct ? (
+          <div className="purchase-preview">
+            <MetricLine label="Producto" value={selectedProduct.name} />
+            <MetricLine label="Compra" value={`${formatQuantity(quantityNumber)} ${selectedProduct.purchaseUnit || 'paquetes'}`} />
+            <MetricLine label="Equivale a" value={`${formatQuantity(baseUnits)} ${stockUnit(selectedProduct)}`} />
+            <MetricLine label="Costo por paquete" value={money.format(costPerPackage)} />
+            <MetricLine label="Costo por unidad" value={money.format(costPerUnit)} />
+            <MetricLine label="Precio venta actual" value={money.format(salePrice)} />
+            <MetricLine label="Precio sugerido" value={money.format(suggestedSalePrice)} />
+            <MetricLine label="Margen estimado" value={`${marginPercent.toFixed(1)}%`} />
+            <MetricLine label="Stock luego de comprar" value={`${formatQuantity(stockAfterPurchase)} ${stockUnit(selectedProduct)}`} />
+          </div>
+        ) : (
+          <EmptyText text="Selecciona un producto para calcular costo unitario, precio sugerido y stock final." />
+        )}
+      </Card>
+
+      <Card className="panel suppliers-panel">
+        <span className="eyebrow">Proveedores</span>
+        <h3>Ficha rapida</h3>
+        <div className="table-list">
+          {suppliers.slice(0, 6).map((supplier) => (
+            <div className="table-row" key={supplier.id}>
+              <span>{supplier.name}</span>
+              <small>{supplier.company || supplier.phone || 'Sin datos extra'}</small>
+              <b>{money.format(supplier.pendingBalance || 0)}</b>
+            </div>
+          ))}
+          {suppliers.length === 0 && <EmptyText text="Aun no hay proveedores registrados." />}
+        </div>
+      </Card>
+    </div>
+  )
+}
 
 function ExpensesView({ expenses, refresh, request, showToast }: {
   expenses: Expense[]
@@ -1918,6 +2427,15 @@ function ExpensesView({ expenses, refresh, request, showToast }: {
   request: <T>(path: string, options?: ApiRequestInit) => Promise<T>
   showToast: (type: ToastKind, message: string) => void
 }) {
+  const expenseCategories = [
+    { value: 'servicios', label: 'Servicios' },
+    { value: 'transporte', label: 'Movilidad' },
+    { value: 'otros', label: 'Mercaderia' },
+    { value: 'mantenimiento', label: 'Limpieza' },
+    { value: 'otros', label: 'Bolsas' },
+    { value: 'otros', label: 'Refrigerios' },
+    { value: 'otros', label: 'Otros' },
+  ]
   const emptyExpenseForm = { category: 'otros', description: '', amount: '0', paymentMethod: 'cash', isRecurring: false, dueDay: '1', recurringStart: '', recurringEnd: '' }
   const [form, setForm] = useState(emptyExpenseForm)
   const [editingExpense, setEditingExpense] = useState<Expense | null>(null)
@@ -1991,8 +2509,8 @@ function ExpensesView({ expenses, refresh, request, showToast }: {
           <label>
             Categoría
             <select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })}>
-              {['alquiler', 'servicios', 'transporte', 'sueldos', 'mantenimiento', 'otros'].map((category) => (
-                <option key={category} value={category}>{category}</option>
+              {expenseCategories.map((category) => (
+                <option key={`${category.value}-${category.label}`} value={category.value}>{category.label}</option>
               ))}
             </select>
           </label>
@@ -2068,8 +2586,8 @@ function ExpensesView({ expenses, refresh, request, showToast }: {
               <label>
                 Categoria
                 <select value={editForm.category} onChange={(event) => setEditForm({ ...editForm, category: event.target.value })}>
-                  {['alquiler', 'servicios', 'transporte', 'sueldos', 'mantenimiento', 'otros'].map((category) => (
-                    <option key={category} value={category}>{category}</option>
+                  {expenseCategories.map((category) => (
+                    <option key={`${category.value}-${category.label}`} value={category.value}>{category.label}</option>
                   ))}
                 </select>
               </label>
@@ -2157,6 +2675,130 @@ function ReportsView({ summary, topProducts, products, expenses }: { summary: Su
             <Bar dataKey="value" fill="#e0a45b" radius={[6, 6, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
+      </section>
+    </div>
+  )
+}
+void ReportsView
+
+function ReportsViewV2({ summary, topProducts, products, expenses }: { summary: Summary | null; topProducts: TopProduct[]; products: Product[]; expenses: Expense[] }) {
+  const inventoryValue = products.reduce((sum, product) => sum + (product.averageCostBase || product.purchasePrice) * availableStock(product), 0)
+  const expenseChart = expenses.slice(0, 8).map((expense) => ({ name: expense.description.slice(0, 10), value: expense.amount }))
+  const categoryChart = Object.values(
+    products.reduce<Record<string, { name: string; stock: number; value: number }>>((groups, product) => {
+      const key = product.category || 'General'
+      const current = groups[key] ?? { name: key, stock: 0, value: 0 }
+      current.stock += availableStock(product)
+      current.value += availableStock(product) * product.salePrice
+      groups[key] = current
+      return groups
+    }, {}),
+  ).slice(0, 8)
+  const lowStockProducts = products.filter((product) => product.isLowStock || availableStock(product) <= (product.minimumStockBase || product.minimumStock)).slice(0, 6)
+  const expiringProducts = products.filter((product) => isExpiringSoon(product.expirationDate)).slice(0, 6)
+  const profitableProducts = products
+    .map((product) => ({
+      ...product,
+      margin: product.salePrice - (product.averageCostBase || product.purchasePrice),
+      marginPercent: safeMargin(product.averageCostBase || product.purchasePrice, product.salePrice),
+    }))
+    .sort((a, b) => b.margin - a.margin)
+    .slice(0, 8)
+
+  return (
+    <div className="view-grid">
+      <MetricCard label="Valor inventario" value={money.format(inventoryValue)} icon={Boxes} tone="teal" />
+      <MetricCard label="Ganancia neta" value={money.format(summary?.netProfit ?? 0)} icon={DollarSign} tone="green" />
+      <MetricCard label="Egresos" value={money.format(summary?.expenses ?? 0)} icon={ReceiptText} tone="amber" />
+      <MetricCard label="Stock bajo" value={`${lowStockProducts.length}`} icon={AlertTriangle} tone="amber" />
+
+      <section className="panel wide report-period-panel">
+        <span className="eyebrow">Reportes</span>
+        <h3>Lecturas listas para la duena</h3>
+        <div className="period-grid">
+          {['Diario', 'Semanal', 'Mensual', 'Anual', 'Por categoria'].map((period) => (
+            <span key={period}>{period}</span>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel wide">
+        <span className="eyebrow">Top productos</span>
+        <h3>Top 10 productos vendidos</h3>
+        <ResponsiveContainer width="100%" height={280}>
+          <BarChart data={topProducts.slice(0, 10)}>
+            <CartesianGrid strokeDasharray="4 4" stroke="#e2d7ef" />
+            <XAxis dataKey="productName" />
+            <YAxis />
+            <Tooltip />
+            <Bar dataKey="quantity" fill="#6c35a0" radius={[6, 6, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </section>
+
+      <section className="panel">
+        <span className="eyebrow">Categorias</span>
+        <h3>Inventario por categoria</h3>
+        <ResponsiveContainer width="100%" height={260}>
+          <BarChart data={categoryChart}>
+            <XAxis dataKey="name" />
+            <YAxis />
+            <Tooltip formatter={(value) => Number(value).toLocaleString('es-PE')} />
+            <Bar dataKey="stock" fill="#9b5bd2" radius={[6, 6, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </section>
+
+      <section className="panel">
+        <span className="eyebrow">Gastos</span>
+        <h3>Ultimos montos</h3>
+        <ResponsiveContainer width="100%" height={260}>
+          <BarChart data={expenseChart}>
+            <XAxis dataKey="name" />
+            <YAxis />
+            <Tooltip formatter={(value) => money.format(Number(value))} />
+            <Bar dataKey="value" fill="#e0a45b" radius={[6, 6, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </section>
+
+      <section className="panel">
+        <span className="eyebrow">Rentabilidad</span>
+        <h3>Productos mas rentables</h3>
+        <div className="rank-list">
+          {profitableProducts.map((product, index) => (
+            <div className="rank-item" key={product.id}>
+              <span>{index + 1}</span>
+              <div>
+                <strong>{product.name}</strong>
+                <small>{money.format(product.margin)} por {stockUnit(product)} - {product.marginPercent.toFixed(1)}%</small>
+              </div>
+              <b>{money.format(product.salePrice)}</b>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel">
+        <span className="eyebrow">Alertas</span>
+        <h3>Vencimiento y stock</h3>
+        <div className="table-list">
+          {lowStockProducts.map((product) => (
+            <div className="table-row" key={`stock-${product.id}`}>
+              <span>{product.name}</span>
+              <small>Stock bajo</small>
+              <b>{formatQuantity(availableStock(product))} {stockUnit(product)}</b>
+            </div>
+          ))}
+          {expiringProducts.map((product) => (
+            <div className="table-row" key={`exp-${product.id}`}>
+              <span>{product.name}</span>
+              <small>Vence {formatDate(product.expirationDate)}</small>
+              <b>{product.location || 'Sin ubicacion'}</b>
+            </div>
+          ))}
+          {lowStockProducts.length === 0 && expiringProducts.length === 0 && <EmptyText text="Sin alertas criticas de inventario." />}
+        </div>
       </section>
     </div>
   )

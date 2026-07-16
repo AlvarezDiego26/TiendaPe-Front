@@ -1076,6 +1076,10 @@ button:disabled {
   min-height: 280px;
 }
 
+.suppliers-panel {
+  grid-column: 1 / -1;
+}
+
 .purchase-preview {
   display: grid;
   gap: 10px;
@@ -1083,6 +1087,26 @@ button:disabled {
 
 .purchase-preview .metric-line {
   grid-template-columns: 1fr auto;
+}
+
+.period-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.period-grid span {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0 16px;
+  background: rgba(108, 53, 160, 0.1);
+  color: var(--brand);
+  font-weight: 800;
+  border: 1px solid rgba(108, 53, 160, 0.16);
 }
 
 .purchase-preview .metric-line strong,
